@@ -165,3 +165,28 @@ else:
         print(f"[{row['Date'].strftime('%Y-%m-%d %H:%M')}] {match_info[:30]:<30} | Confidence: {prob}")
 
     print("=" * 50)
+
+    # ---------------------------------------------------------
+    # 5. THE PAPER TRAIL (Save ALL predictions to Database)
+    # ---------------------------------------------------------
+    print("\n📝 Saving ALL predictions to the Paper Trail database...")
+
+    # Create a clean dataframe with just the details we need to track
+    paper_trail = upcoming_matches[['MatchId', 'HomeTeam', 'AwayTeam', 'Date', 'AI_Over25_Prob']].copy()
+
+
+    # Add a UTC timestamp (Crucial for Entity Framework compatibility!)
+    paper_trail['PredictedOn'] = pd.Timestamp.utcnow()
+    paper_trail['Model'] = 'first'
+
+    if len(paper_trail) > 0:
+        try:
+            # Write directly to your PostgreSQL database!
+            paper_trail.to_sql('AiPredictionsLogs', con=engine, if_exists='append', index=False)
+            print(f"✅ Successfully saved {len(paper_trail)} predictions to the 'AI_Predictions_Log' table!")
+        except Exception as e:
+            print(f"❌ Error saving to database: {e}")
+
+            # FALLBACK: If SQL fails, save to a CSV file on your computer just in case
+            paper_trail.to_csv('paper_trail_backup.csv', mode='a', index=False, header=False)
+            print("💾 Saved to 'paper_trail_backup.csv' instead.")
