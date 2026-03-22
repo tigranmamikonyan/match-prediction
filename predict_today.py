@@ -30,9 +30,11 @@ df['Date'] = pd.to_datetime(df['Date'])
 df[['HomeGoals', 'AwayGoals']] = df['Score'].str.split(':', expand=True).astype(float)
 
 # ---------------------------------------------------------
-# 3. RECREATE THE MASTER LOOP (To get today's momentum)
+# 3. RECREATE THE MASTER LOOP (With Over 2.5 Rates included!)
 # ---------------------------------------------------------
 print("📊 Calculating live momentum for today's matches...")
+
+# We update team_general to hold the Over 2.5 history as well as the last played date
 team_general, home_specific, away_specific, h2h_tracker = {}, {}, {}, {}
 recent_100_games = []
 
@@ -40,6 +42,9 @@ home_rest, away_rest = [], []
 h_home_scored, h_home_conceded = [], []
 a_away_scored, a_away_conceded = [], []
 h2h_avg, global_env_avg = [], []
+
+# --- NEW LISTS FOR YOUR MISSING COLUMNS ---
+h_over25_rate, a_over25_rate = [], []
 
 
 def get_avg(goal_list, default=1.0):
@@ -53,16 +58,18 @@ for index, row in df.iterrows():
 
     # Initialize
     for t_id in [h_id, a_id]:
-        if t_id not in team_general: team_general[t_id] = m_date
+        if t_id not in team_general:
+            # Now we track the last date AND their recent Over 2.5 success
+            team_general[t_id] = {'last_date': m_date, 'over25_history': []}
         if t_id not in home_specific: home_specific[t_id] = {'scored': [], 'conceded': []}
         if t_id not in away_specific: away_specific[t_id] = {'scored': [], 'conceded': []}
 
     h2h_key = tuple(sorted([h_id, a_id]))
     if h2h_key not in h2h_tracker: h2h_tracker[h2h_key] = []
 
-    # Calculate Current Features
-    h_rest = (m_date - team_general[h_id]).days
-    a_rest = (m_date - team_general[a_id]).days
+    # --- A. Calculate Features BEFORE the match ---
+    h_rest = (m_date - team_general[h_id]['last_date']).days
+    a_rest = (m_date - team_general[a_id]['last_date']).days
     home_rest.append(h_rest if 0 < h_rest <= 14 else 14)
     away_rest.append(a_rest if 0 < a_rest <= 14 else 14)
 
@@ -73,11 +80,28 @@ for index, row in df.iterrows():
     h2h_avg.append(get_avg(h2h_tracker[h2h_key], default=2.5))
     global_env_avg.append(get_avg(recent_100_games, default=2.5))
 
-    # Update Trackers ONLY IF the match has actually been played (has goals)
-    if pd.notna(row['HomeGoals']):
-        team_general[h_id] = m_date
-        team_general[a_id] = m_date
+    # --- B. Calculate the missing Over 2.5 Rates ---
+    h_hist = team_general[h_id]['over25_history']
+    a_hist = team_general[a_id]['over25_history']
+    # If no history yet, default to 0.5 (50%)
+    h_over25_rate.append(sum(h_hist) / len(h_hist) if len(h_hist) > 0 else 0.5)
+    a_over25_rate.append(sum(a_hist) / len(a_hist) if len(a_hist) > 0 else 0.5)
 
+    # --- C. Update Trackers AFTER the match (if it has goals) ---
+    if pd.notna(row['HomeGoals']):
+        team_general[h_id]['last_date'] = m_date
+        team_general[a_id]['last_date'] = m_date
+
+        # Track if this match went Over 2.5
+        is_over = 1 if row['GoalsCount'] > 2 else 0
+
+        # Update General Over 2.5 History
+        team_general[h_id]['over25_history'].append(is_over)
+        team_general[a_id]['over25_history'].append(is_over)
+        team_general[h_id]['over25_history'] = team_general[h_id]['over25_history'][-5:]
+        team_general[a_id]['over25_history'] = team_general[a_id]['over25_history'][-5:]
+
+        # Update Specific Form
         home_specific[h_id]['scored'].append(row['HomeGoals'])
         home_specific[h_id]['conceded'].append(row['AwayGoals'])
         home_specific[h_id]['scored'] = home_specific[h_id]['scored'][-5:]
@@ -94,7 +118,7 @@ for index, row in df.iterrows():
         recent_100_games.append(row['GoalsCount'])
         recent_100_games = recent_100_games[-100:]
 
-# Apply calculated features back to the dataframe
+# Apply ALL calculated features back to the dataframe
 df['Home_RestDays'] = home_rest
 df['Away_RestDays'] = away_rest
 df['Home_HomeAvgScored'] = h_home_scored
@@ -104,10 +128,13 @@ df['Away_AwayAvgConceded'] = a_away_conceded
 df['H2H_AvgGoals'] = h2h_avg
 df['Global_Env_Avg'] = global_env_avg
 
+# --- ADD THE MISSING COLUMNS ---
+df['Home_Over25Rate'] = h_over25_rate
+df['Away_Over25Rate'] = a_over25_rate
+
 # ---------------------------------------------------------
 # 4. FILTER FOR UPCOMING MATCHES & PREDICT
 # ---------------------------------------------------------
-# We assume unplayed matches have no Score/GoalsCount yet.
 upcoming_matches = df[df['GoalsCount'].isnull()].copy()
 
 if len(upcoming_matches) == 0:
@@ -115,11 +142,9 @@ if len(upcoming_matches) == 0:
 else:
     print(f"🎯 Found {len(upcoming_matches)} upcoming matches. Generating predictions...\n")
 
-    # Select the exact features the AI was trained on
-    X_live = upcoming_matches[['Home_RestDays', 'Away_RestDays',
-                               'Home_HomeAvgScored', 'Home_HomeAvgConceded',
-                               'Away_AwayAvgScored', 'Away_AwayAvgConceded',
-                               'H2H_AvgGoals', 'Global_Env_Avg']]
+    # --- CRITICAL: MUST MATCH TRAINING ORDER EXACTLY ---
+    # Make sure this list is exactly the same as your 'X' in the training script
+    X_live = upcoming_matches[scaler.feature_names_in_]
 
     # Put the "Glasses" on (Scale the data)
     X_live_scaled = scaler.transform(X_live)
@@ -128,14 +153,13 @@ else:
     predictions = model.predict(X_live_scaled, verbose=0)
 
     # Attach predictions to our readable dataframe
-    upcoming_matches['AI_Over25_Prob'] = predictions * 100  # Convert to percentage
+    upcoming_matches['AI_Over25_Prob'] = predictions * 100
 
-    # Sort by the most confident predictions
     top_picks = upcoming_matches.sort_values(by='AI_Over25_Prob', ascending=False)
 
     print("🔥 TOP AI PREDICTIONS FOR OVER 2.5 GOALS 🔥")
     print("=" * 50)
-    for index, row in top_picks.head(10).iterrows():
+    for index, row in top_picks.head(1000).iterrows():
         match_info = f"{row['HomeTeam']} vs {row['AwayTeam']}"
         prob = f"{row['AI_Over25_Prob']:.2f}%"
         print(f"[{row['Date'].strftime('%Y-%m-%d %H:%M')}] {match_info[:30]:<30} | Confidence: {prob}")
