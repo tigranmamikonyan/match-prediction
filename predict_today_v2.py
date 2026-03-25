@@ -18,8 +18,9 @@ MODEL_PATH    = 'over25_brain_v2_prematch.keras'
 SCALER_PATH   = 'over25_scaler_v2_prematch.save'
 FEATURES_PATH = 'over25_features_v2_prematch.save'
 
-TOP_N         = 1000   # How many upcoming matches to print
-MIN_CONF      = 0.0    # Minimum confidence % to show (e.g. 60.0 to filter weak picks)
+TOP_N      = 20000
+MIN_CONF   = 0.0
+MODEL_NAME = 'v2_prematch'
 
 # ---------------------------------------------------------
 # STEP 1: LOAD MODEL, SCALER, FEATURE LIST
@@ -67,16 +68,16 @@ team_over25    = {}
 h2h_tracker    = {}
 recent_100     = []
 
-home_rest_list, away_rest_list              = [], []
-h_home_scored_list, h_home_conceded_list    = [], []
-a_away_scored_list, a_away_conceded_list    = [], []
-h_all_scored_list,  h_all_conceded_list     = [], []
-a_all_scored_list,  a_all_conceded_list     = [], []
-h_home_var_list,    a_away_var_list         = [], []
-h_over25_list,      a_over25_list          = [], []
-h_streak_list,      a_streak_list          = [], []
-h2h_avg_list,       h2h_over25_list        = [], []
-global_env_list                             = []
+home_rest_list, away_rest_list           = [], []
+h_home_scored_list, h_home_conceded_list = [], []
+a_away_scored_list, a_away_conceded_list = [], []
+h_all_scored_list,  h_all_conceded_list  = [], []
+a_all_scored_list,  a_all_conceded_list  = [], []
+h_home_var_list,    a_away_var_list      = [], []
+h_over25_list,      a_over25_list        = [], []
+h_streak_list,      a_streak_list        = [], []
+h2h_avg_list,       h2h_over25_list      = [], []
+global_env_list                          = []
 
 
 def get_avg(lst, default=1.0):
@@ -108,15 +109,14 @@ for _, row in df.iterrows():
 
     for t_id in (h_id, a_id):
         team_last_date.setdefault(t_id, m_date)
-        home_specific.setdefault(t_id,  {'scored': [], 'conceded': []})
-        away_specific.setdefault(t_id,  {'scored': [], 'conceded': []})
-        all_specific.setdefault(t_id,   {'scored': [], 'conceded': [], 'results': []})
-        team_over25.setdefault(t_id,    [])
+        home_specific.setdefault(t_id, {'scored': [], 'conceded': []})
+        away_specific.setdefault(t_id, {'scored': [], 'conceded': []})
+        all_specific.setdefault(t_id,  {'scored': [], 'conceded': [], 'results': []})
+        team_over25.setdefault(t_id,   [])
 
     h2h_key = tuple(sorted([h_id, a_id]))
     h2h_tracker.setdefault(h2h_key, {'goals': [], 'over25': []})
 
-    # ---- CALCULATE features before this match ----
     h_rest = (m_date - team_last_date[h_id]).days
     a_rest = (m_date - team_last_date[a_id]).days
     home_rest_list.append(h_rest if 0 < h_rest <= 14 else 14)
@@ -161,12 +161,12 @@ for _, row in df.iterrows():
         away_specific[a_id]['scored']   = (away_specific[a_id]['scored']   + [row['AwayGoals']])[-5:]
         away_specific[a_id]['conceded'] = (away_specific[a_id]['conceded'] + [row['HomeGoals']])[-5:]
 
-        all_specific[h_id]['scored']    = (all_specific[h_id]['scored']    + [row['HomeGoals']])[-10:]
-        all_specific[h_id]['conceded']  = (all_specific[h_id]['conceded']  + [row['AwayGoals']])[-10:]
-        all_specific[h_id]['results']   = (all_specific[h_id]['results']   + [h_won])[-10:]
-        all_specific[a_id]['scored']    = (all_specific[a_id]['scored']    + [row['AwayGoals']])[-10:]
-        all_specific[a_id]['conceded']  = (all_specific[a_id]['conceded']  + [row['HomeGoals']])[-10:]
-        all_specific[a_id]['results']   = (all_specific[a_id]['results']   + [a_won])[-10:]
+        all_specific[h_id]['scored']   = (all_specific[h_id]['scored']   + [row['HomeGoals']])[-10:]
+        all_specific[h_id]['conceded'] = (all_specific[h_id]['conceded'] + [row['AwayGoals']])[-10:]
+        all_specific[h_id]['results']  = (all_specific[h_id]['results']  + [h_won])[-10:]
+        all_specific[a_id]['scored']   = (all_specific[a_id]['scored']   + [row['AwayGoals']])[-10:]
+        all_specific[a_id]['conceded'] = (all_specific[a_id]['conceded'] + [row['HomeGoals']])[-10:]
+        all_specific[a_id]['results']  = (all_specific[a_id]['results']  + [a_won])[-10:]
 
         team_over25[h_id] = (team_over25[h_id] + [match_over])[-10:]
         team_over25[a_id] = (team_over25[a_id] + [match_over])[-10:]
@@ -176,7 +176,6 @@ for _, row in df.iterrows():
 
         recent_100 = (recent_100 + [total_goals])[-100:]
 
-# Attach all features
 df['Home_RestDays']        = home_rest_list
 df['Away_RestDays']        = away_rest_list
 df['Home_HomeAvgScored']   = h_home_scored_list
@@ -211,8 +210,7 @@ else:
     X_live_scaled = scaler.transform(X_live)
     probs         = model.predict(X_live_scaled, verbose=0).flatten() * 100
 
-    upcoming = upcoming.copy()
-    upcoming['AI_Over25_Prob'] = probs
+    upcoming['AI_Over25_Prob']  = probs
     upcoming['AI_Under25_Prob'] = 100 - probs
 
     # Apply confidence filter and sort
@@ -230,11 +228,8 @@ else:
         over_p  = row['AI_Over25_Prob']
         under_p = row['AI_Under25_Prob']
         date_s  = row['Date'].strftime('%Y-%m-%d %H:%M')
-
-        # Visual confidence bar (10 chars)
-        filled = int(over_p / 10)
-        bar    = '█' * filled + '░' * (10 - filled)
-
+        filled  = int(over_p / 10)
+        bar     = '█' * filled + '░' * (10 - filled)
         print(f"{date_s:<18} {match[:32]:<32} {over_p:>8.1f}%  {under_p:>8.1f}%   {bar}")
 
     print("=" * 72)
@@ -242,27 +237,36 @@ else:
           f"Min confidence filter: {MIN_CONF}% | "
           f"Avg confidence: {filtered['AI_Over25_Prob'].mean():.1f}%")
 
-
     # ---------------------------------------------------------
-    # 5. THE PAPER TRAIL (Save ALL predictions to Database)
+    # STEP 5: SAVE — skip MatchIds already logged for this model
     # ---------------------------------------------------------
-    print("\n📝 Saving ALL predictions to the Paper Trail database...")
+    print("\n📝 Saving new predictions to database...")
 
-    # Create a clean dataframe with just the details we need to track
-    paper_trail = upcoming[['MatchId', 'HomeTeam', 'AwayTeam', 'Date', 'AI_Over25_Prob']].copy()
-
-    # Add a UTC timestamp (Crucial for Entity Framework compatibility!)
+    paper_trail            = upcoming[['MatchId', 'HomeTeam', 'AwayTeam', 'Date', 'AI_Over25_Prob']].copy()
     paper_trail['PredictedOn'] = pd.Timestamp.utcnow()
-    paper_trail['Model'] = 'v2_prematch'
+    paper_trail['Model']       = MODEL_NAME
+    paper_trail['MatchId']     = paper_trail['MatchId'].astype(str)
 
-    if len(paper_trail) > 0:
-        try:
-            # Write directly to your PostgreSQL database!
-            paper_trail.to_sql('AiPredictionsLogs', con=engine, if_exists='append', index=False)
-            print(f"✅ Successfully saved {len(paper_trail)} predictions to the 'AI_Predictions_Log' table!")
-        except Exception as e:
-            print(f"❌ Error saving to database: {e}")
+    try:
+        # Fetch MatchIds already saved for this model
+        existing       = pd.read_sql(
+            f'SELECT "MatchId" FROM "AiPredictionsLogs" WHERE "Model" = \'{MODEL_NAME}\';',
+            con=engine
+        )
+        already_logged = set(existing['MatchId'].astype(str))
 
-            # FALLBACK: If SQL fails, save to a CSV file on your computer just in case
-            paper_trail.to_csv('paper_trail_backup.csv', mode='a', index=False, header=False)
-            print("💾 Saved to 'paper_trail_backup.csv' instead.")
+        new_predictions = paper_trail[~paper_trail['MatchId'].isin(already_logged)]
+        skipped         = len(paper_trail) - len(new_predictions)
+
+        if len(new_predictions) == 0:
+            print("✅ Nothing to save — all matches already logged.")
+        else:
+            new_predictions.to_sql('AiPredictionsLogs', con=engine, if_exists='append', index=False)
+            print(f"✅ Saved {len(new_predictions)} new predictions.")
+            if skipped:
+                print(f"⏭️  Skipped {skipped} already-logged matches.")
+
+    except Exception as e:
+        print(f"❌ Error saving to database: {e}")
+        paper_trail.to_csv('paper_trail_backup.csv', mode='a', index=False, header=False)
+        print("💾 Fallback: saved to 'paper_trail_backup.csv'.")

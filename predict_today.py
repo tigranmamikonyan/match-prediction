@@ -9,6 +9,8 @@ warnings.filterwarnings('ignore')
 
 print("🤖 Waking up the AI...")
 
+MODEL_NAME = 'first'
+
 # 1. Load the Brain and the Glasses
 try:
     model = load_model('over25_brain.keras')
@@ -171,22 +173,31 @@ else:
     # ---------------------------------------------------------
     print("\n📝 Saving ALL predictions to the Paper Trail database...")
 
-    # Create a clean dataframe with just the details we need to track
-    paper_trail = upcoming_matches[['MatchId', 'HomeTeam', 'AwayTeam', 'Date', 'AI_Over25_Prob']].copy()
-
-
-    # Add a UTC timestamp (Crucial for Entity Framework compatibility!)
+    paper_trail                = upcoming_matches[['MatchId', 'HomeTeam', 'AwayTeam', 'Date', 'AI_Over25_Prob']].copy()
     paper_trail['PredictedOn'] = pd.Timestamp.utcnow()
-    paper_trail['Model'] = 'first'
+    paper_trail['Model']       = MODEL_NAME
+    paper_trail['MatchId']     = paper_trail['MatchId'].astype(str)
 
-    if len(paper_trail) > 0:
-        try:
-            # Write directly to your PostgreSQL database!
-            paper_trail.to_sql('AiPredictionsLogs', con=engine, if_exists='append', index=False)
-            print(f"✅ Successfully saved {len(paper_trail)} predictions to the 'AI_Predictions_Log' table!")
-        except Exception as e:
-            print(f"❌ Error saving to database: {e}")
+    try:
+        # Fetch MatchIds already saved for this model
+        existing       = pd.read_sql(
+            f'SELECT "MatchId" FROM "AiPredictionsLogs" WHERE "Model" = \'{MODEL_NAME}\';',
+            con=engine
+        )
+        already_logged = set(existing['MatchId'].astype(str))
 
-            # FALLBACK: If SQL fails, save to a CSV file on your computer just in case
-            paper_trail.to_csv('paper_trail_backup.csv', mode='a', index=False, header=False)
-            print("💾 Saved to 'paper_trail_backup.csv' instead.")
+        new_predictions = paper_trail[~paper_trail['MatchId'].isin(already_logged)]
+        skipped         = len(paper_trail) - len(new_predictions)
+
+        if len(new_predictions) == 0:
+            print("✅ Nothing to save — all matches already logged.")
+        else:
+            new_predictions.to_sql('AiPredictionsLogs', con=engine, if_exists='append', index=False)
+            print(f"✅ Saved {len(new_predictions)} new predictions.")
+            if skipped:
+                print(f"⏭️  Skipped {skipped} already-logged matches.")
+
+    except Exception as e:
+        print(f"❌ Error saving to database: {e}")
+        paper_trail.to_csv('paper_trail_backup.csv', mode='a', index=False, header=False)
+        print("💾 Fallback: saved to 'paper_trail_backup.csv'.")
