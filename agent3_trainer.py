@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 from sqlalchemy import create_engine
 import xgboost as xgb
-from sklearn.metrics import accuracy_score, classification_report
+from sklearn.metrics import accuracy_score, classification_report, brier_score_loss
 import warnings
 
 warnings.filterwarnings('ignore')
@@ -229,3 +229,48 @@ def audit_agent3_ev(test_df):
 # --- HOW TO RUN IT ---
 # We just pass in df_test, since Agent 3 already generated its Confidence scores on it!
 audit_agent3_ev(df_test)
+
+def diagnose_agent1_accuracy(df):
+    print("\n==================================================")
+    print("🎯 THE TRUTH: Is Agent 1 actually picking winners?")
+    print("==================================================\n")
+
+    # 1. Overall Brier Score (The Ultimate Penalty Metric)
+    # 0.0 is perfect. 0.25 is blind guessing. > 0.25 is actively terrible.
+    overall_brier = brier_score_loss(df['ActualResult'], df['ModelProb'])
+
+    # 2. Hard Accuracy (If it predicted > 50%, did the match actually go Over 2.5?)
+    df['Binary_Prediction'] = (df['ModelProb'] > 0.50).astype(int)
+    overall_accuracy = accuracy_score(df['ActualResult'], df['Binary_Prediction'])
+
+    print(f"📉 AGENT 1 OVERALL METRICS:")
+    print(f"   Overall Brier Score: {overall_brier:.4f} (Goal: Get this below 0.20)")
+    print(f"   Hard Accuracy:       {(overall_accuracy * 100):.2f}%\n")
+
+    # 3. Bucket Breakdown
+    bins = [0.0, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70, 0.80, 1.0]
+    df['Prob_Bucket'] = pd.cut(df['ModelProb'], bins=bins)
+
+    results = []
+    for name, group in df.groupby('Prob_Bucket', observed=True):
+        if len(group) < 50:
+            continue
+
+        brier = brier_score_loss(group['ActualResult'], group['ModelProb'])
+        acc = accuracy_score(group['ActualResult'], group['Binary_Prediction'])
+
+        results.append({
+            'Bucket': str(name),
+            'Matches': len(group),
+            'Promised_Win_%': f"{(group['ModelProb'].mean() * 100):.1f}%",
+            'Actual_Win_%': f"{(group['ActualResult'].mean() * 100):.1f}%",
+            'Bucket_Accuracy': f"{(acc * 100):.1f}%",
+            'Brier_Score': round(brier, 4)
+        })
+
+    audit_df = pd.DataFrame(results)
+    print(audit_df.to_string(index=False))
+    print("\n==================================================")
+
+# --- Run the real diagnostic ---
+diagnose_agent1_accuracy(df)
