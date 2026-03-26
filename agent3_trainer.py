@@ -43,25 +43,49 @@ sql_query = """
 df = pd.read_sql(sql_query, con=engine)
 print(f"✅ Loaded {len(df)} historical 'Value Bets' from Agent 1.")
 
-# 3. Define Features (What Agent 3 looks at) and Target (Did we win?)
-# We keep it simple: Agent 3 looks at the AI's confidence vs the Bookmaker's payout
-X = df[['ModelProb', 'Over25Odds']]
+# ==========================================
+# ⚙️ NEW: FEATURE ENGINEERING
+# ==========================================
+print("\n⚙️ Engineering new smart features...")
+
+# Calculate the Bookmaker's Implied Probability
+df['ImpliedProb'] = 1.0 / df['Over25Odds']
+
+# Calculate the Value Delta (How much of an edge do we have?)
+df['Value_Delta'] = df['ModelProb'] - df['ImpliedProb']
+
+# Create an Odds Bracket (1 = Heavy Fav, 2 = Medium, 3 = Underdog)
+# Bins updated to cover all possible odds safely
+conditions = [
+    (df['Over25Odds'] <= 1.5),
+    (df['Over25Odds'] > 1.5) & (df['Over25Odds'] <= 2.0),
+    (df['Over25Odds'] > 2.0)
+]
+choices = [1, 2, 3]
+df['Odds_Bracket'] = np.select(conditions, choices, default=3)
+
+print("✅ Features added.")
+# ==========================================
+
+# 3. Define Features (What Agent 3 looks at) and Target
+# UPDATED: Now includes our two new smart features
+X = df[['ModelProb', 'Over25Odds', 'Value_Delta', 'Odds_Bracket']]
 y = df['ActualResult']
 
 # 4. Chronological Train/Test Split (80% Training, 20% Future Testing)
-# We do NOT shuffle. We want to train on the past and test on the future to simulate reality.
 split_index = int(len(df) * 0.8)
 
 X_train, X_test = X.iloc[:split_index], X.iloc[split_index:]
 y_train, y_test = y.iloc[:split_index], y.iloc[split_index:]
 df_test = df.iloc[split_index:].copy()
+df_train = df.iloc[:split_index].copy()
 
 # 5. Build and Train Agent 3 (XGBoost)
 print("\n🌲 Training Agent 3 (XGBoost Board of Directors)...")
 model = xgb.XGBClassifier(
-    max_depth=4,              # Keep it shallow so it doesn't overfit
-    learning_rate=0.05,       # Learn slowly and carefully
-    n_estimators=100,         # 100 trees in the forest
+    max_depth=4,
+    learning_rate=0.05,
+    n_estimators=100,
     eval_metric='logloss',
     random_state=42
 )
@@ -69,7 +93,6 @@ model = xgb.XGBClassifier(
 model.fit(X_train, y_train)
 
 # 6. Ask Agent 3 to filter the Future Test Data
-# It outputs a probability (0.0 to 1.0) of whether the bet will actually win
 df_test['Agent3_Confidence'] = model.predict_proba(X_test)[:, 1]
 
 # We tell Agent 3 to be strict: Only approve bets it is >50% sure will win
@@ -106,48 +129,51 @@ print("="*50)
 model.save_model("agent3_xgboost.json")
 
 
-def train_xgboost_profit_optimizer(df):
+def train_xgboost_profit_optimizer(train_df, test_df):
     print("\n==================================================")
-    print("🚀 TRAINING XGBOOST: The Profit Optimizer")
+    print("🚀 TRAINING XGBOOST: The Profit Optimizer (OUT-OF-SAMPLE TEST)")
     print("==================================================\n")
 
-    # 1. Clean the data and define features
-    # We use the raw probability and the bookmaker odds
-    df_clean = df.dropna(subset=['ModelProb', 'Over25Odds', 'ProfitPer1Unit', 'ActualResult']).copy()
-    
-    X = df_clean[['ModelProb', 'Over25Odds']]
-    y = df_clean['ProfitPer1Unit'] # Training it to predict actual units won/lost
+    # 1. Clean the TRAINING data and fit the model (Learning from the Past)
+    train_clean = train_df.dropna(subset=['ModelProb', 'Over25Odds', 'Value_Delta', 'Odds_Bracket', 'ProfitPer1Unit', 'ActualResult']).copy()
 
-    # 2. Build the XGBoost Regressor
-    # We use a regressor because profit is a continuous number, not a 1/0 classification
+    # UPDATED: Feed the optimizer our new features
+    X_train_opt = train_clean[['ModelProb', 'Over25Odds', 'Value_Delta', 'Odds_Bracket']]
+    y_train_opt = train_clean['ProfitPer1Unit']
+
     xgb_model = xgb.XGBRegressor(
-        n_estimators=100,
-        learning_rate=0.05,
-        max_depth=4,
-        subsample=0.8,
-        colsample_bytree=0.8,
+        n_estimators=150,
+        learning_rate=0.02,        # Slower learning
+        max_depth=2,               # EXTREMELY shallow trees (only 2 questions deep)
+        min_child_weight=200,      # A rule MUST apply to at least 200 matches to be considered
+        subsample=0.7,             # Only look at 70% of data per tree
+        colsample_bytree=0.7,      # Only look at 70% of features per tree
+        reg_alpha=0.5,             # L1 Regularization (Kills useless features)
+        reg_lambda=1.5,            # L2 Regularization (Prevents extreme predictions)
         random_state=42
     )
 
-    # Train the model to predict profit
-    xgb_model.fit(X, y)
+    xgb_model.fit(X_train_opt, y_train_opt)
 
-    # 3. Generate Predictions: What is the Expected Profit of every bet?
-    df_clean['XGB_Predicted_Profit'] = xgb_model.predict(X)
+    # 2. Clean the TESTING data (Simulating the Future)
+    test_clean = test_df.dropna(subset=['ModelProb', 'Over25Odds', 'Value_Delta', 'Odds_Bracket', 'ProfitPer1Unit', 'ActualResult']).copy()
 
-    # 4. The Strategy: Only bet if XGBoost predicts a positive profit
-    # We can test a few different strictness levels
+    # UPDATED: Match the test features to the train features
+    X_test_opt = test_clean[['ModelProb', 'Over25Odds', 'Value_Delta', 'Odds_Bracket']]
+
+    # 3. Generate Predictions on the UNSEEN future data
+    test_clean['XGB_Predicted_Profit'] = xgb_model.predict(X_test_opt)
+
+    # 4. The Strategy Audit
     thresholds = [0.0, 0.05, 0.10, 0.20]
 
-    print("💰 FINANCIAL AUDIT: XGBoost Profit Predictions")
+    print("💰 FINANCIAL AUDIT: Real-World Unseen Future Predictions")
     print("--------------------------------------------------")
     print(f"{'Min Expected Profit':<20} | {'Bets Approved':<15} | {'Total Profit':<15} | {'ROI %':<10}")
     print("-" * 65)
 
     for threshold in thresholds:
-        # Filter bets where the model predicts the profit will be higher than our threshold
-        approved_bets = df_clean[df_clean['XGB_Predicted_Profit'] > threshold]
-
+        approved_bets = test_clean[test_clean['XGB_Predicted_Profit'] > threshold]
         bet_count = len(approved_bets)
 
         if bet_count == 0:
@@ -160,8 +186,46 @@ def train_xgboost_profit_optimizer(df):
 
     print("==================================================")
 
+    # Save this specific profit-maximizing model so you can use it live
+    xgb_model.save_model("agent4_profit_optimizer.json")
     return xgb_model
 
 # --- HOW TO RUN IT ---
-# Pass your dataframe containing the AI_Over25_Prob and Over25Odds columns:
-optimizer_model = train_xgboost_profit_optimizer(df)
+# Pass your dataframe containing the new features:
+optimizer_model = train_xgboost_profit_optimizer(df_train, df_test)
+
+def audit_agent3_ev(test_df):
+    print("\n==================================================")
+    print("🧠 THE MATH APPROACH: True Expected Value (EV) Filter")
+    print("==================================================\n")
+
+    # 1. Calculate True EV using Agent 3's mathematically proven probability
+    # Formula: (Probability * Decimal Odds) - 1
+    test_df['True_EV'] = (test_df['Agent3_Confidence'] * test_df['Over25Odds']) - 1
+
+    # 2. Test different "Safety Margins" (Edges)
+    # 0.0 means any mathematical edge. 0.10 means we demand a 10% edge to risk our money.
+    thresholds = [0.0, 0.05, 0.10, 0.15, 0.20]
+
+    print("💰 FINANCIAL AUDIT: Betting strictly on Agent 3's EV (Out-Of-Sample)")
+    print("--------------------------------------------------")
+    print(f"{'Min EV Margin':<15} | {'Bets Approved':<15} | {'Total Profit':<15} | {'ROI %':<10}")
+    print("-" * 65)
+
+    for threshold in thresholds:
+        approved_bets = test_df[test_df['True_EV'] > threshold]
+        bet_count = len(approved_bets)
+
+        if bet_count == 0:
+            continue
+
+        total_profit = approved_bets['ProfitPer1Unit'].sum()
+        roi = (total_profit / bet_count) * 100
+
+        print(f"> {threshold:<13} | {bet_count:<15} | {round(total_profit, 2):<15} | {round(roi, 2)}%")
+
+    print("==================================================")
+
+# --- HOW TO RUN IT ---
+# We just pass in df_test, since Agent 3 already generated its Confidence scores on it!
+audit_agent3_ev(df_test)
