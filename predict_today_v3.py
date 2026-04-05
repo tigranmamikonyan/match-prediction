@@ -42,7 +42,30 @@ print("🔌 Fetching database...")
 engine = create_engine(DB_URL)
 df = pd.read_sql('SELECT * FROM "Matches" ORDER BY "Date" ASC;', con=engine)
 df['Date'] = pd.to_datetime(df['Date'])
+cutoff_date = pd.Timestamp('2026-02-01')
 
+df['Date'] = pd.to_datetime(df['Date'], utc=True)
+
+# Make sure cutoff_date is also timezone-aware and in the same timezone
+cutoff_date = pd.Timestamp(cutoff_date)
+if cutoff_date.tzinfo is None:
+    cutoff_date = cutoff_date.tz_localize('UTC')
+else:
+    cutoff_date = cutoff_date.tz_convert('UTC')
+
+for i, row in df.iterrows():
+    row_date = row['Date']
+    if row_date.tzinfo is None:
+        row_date = row_date.tz_localize('UTC')
+    else:
+        row_date = row_date.tz_convert('UTC')
+
+    if row_date > cutoff_date:
+        df.at[i, 'GoalsCount'] = None
+        df.at[i, 'FirstHalfGoals'] = None
+        df.at[i, 'Score'] = None
+
+# NEW: Hide results for matches after 2026-02-01 to test prediction logic
 df[['HomeGoals', 'AwayGoals']] = df['Score'].str.split(':', expand=True).astype(float)
 
 # Static date features
