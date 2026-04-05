@@ -13,31 +13,39 @@ engine = create_engine(db_string)
 
 print("🔌 Fetching 20,000+ rows from the database...")
 
-# 2. The exact SQL query you provided to get the raw betting data
+# 2. The exact SQL query you provided, with Tournament features added
 sql_query = """
-            WITH CalculatedBets AS (
-                SELECT
-                    m."MatchId",
-                    p."Date",
-                    p."HomeTeam",
-                    p."AwayTeam",
-                    p."AI_Over25_Prob" / 100.0 AS "ModelProb",
-                    m."GoalsCount",
-                    m."Over25Odds",
-                    CASE WHEN m."GoalsCount" > 2 THEN 1 ELSE 0 END AS "ActualResult",
-                    CASE WHEN ((p."AI_Over25_Prob" / 100.0 * m."Over25Odds") - 1) > 0 THEN 1 ELSE 0 END AS "BetFlag",
-                    CASE
-                        WHEN ((p."AI_Over25_Prob" / 100.0 * m."Over25Odds") - 1) > 0 AND m."GoalsCount" > 2 THEN m."Over25Odds" - 1
-                        WHEN ((p."AI_Over25_Prob" / 100.0 * m."Over25Odds") - 1) > 0 AND m."GoalsCount" <= 2 THEN -1
-                        ELSE 0
-                        END AS "ProfitPer1Unit"
-                FROM "AiPredictionsLogs" p
-                         JOIN "Matches" m ON p."MatchId" = m."MatchId"
-                WHERE m."Over25Odds" IS NOT NULL AND p."Model" = 'v2_prematch' AND "GoalsCount" IS NOT NULL
-            )
-            SELECT * FROM CalculatedBets
-            --WHERE "BetFlag" = 1  -- We only want to train on matches Agent 1 said to bet on!
-            ORDER BY "Date" ASC; -- CRITICAL: Sort chronologically for realistic testing \
+            WITH CalculatedBets AS (SELECT m."MatchId", 
+                                           p."Date", 
+                                           p."HomeTeam", 
+                                           p."AwayTeam", 
+
+                                           -- 👇 NEW: Tournament Features added to SQL 👇 
+                                           m."TournamentId", 
+                                           m."TournamentStageId", 
+
+                                           p."AI_Over25_Prob" / 100.0                     AS "ModelProb", 
+                                           m."GoalsCount", 
+                                           m."Over25Odds", 
+                                           CASE WHEN m."GoalsCount" > 2 THEN 1 ELSE 0 END AS "ActualResult", 
+                                           CASE 
+                                               WHEN ((p."AI_Over25_Prob" / 100.0 * m."Over25Odds") - 1) > 0 THEN 1 
+                                               ELSE 0 END                                 AS "BetFlag", 
+                                           CASE 
+                                               WHEN ((p."AI_Over25_Prob" / 100.0 * m."Over25Odds") - 1) > 0 AND 
+                                                    m."GoalsCount" > 2 THEN m."Over25Odds" - 1 
+                                               WHEN ((p."AI_Over25_Prob" / 100.0 * m."Over25Odds") - 1) > 0 AND 
+                                                    m."GoalsCount" <= 2 THEN -1 
+                                               ELSE 0 
+                                               END                                        AS "ProfitPer1Unit" 
+                                    FROM "AiPredictionsLogs" p 
+                                             JOIN "Matches" m ON p."MatchId" = m."MatchId" 
+                                    WHERE m."Over25Odds" IS NOT NULL 
+                                      AND p."Model" = 'v3_prematch' -- Changed to v3_prematch based on your earlier message 
+                                      AND "GoalsCount" IS NOT NULL)
+            SELECT * 
+            FROM CalculatedBets
+            ORDER BY "Date" ASC; -- CRITICAL: Sort chronologically for realistic testing
             """
 
 df = pd.read_sql(sql_query, con=engine)
@@ -55,7 +63,6 @@ df['ImpliedProb'] = 1.0 / df['Over25Odds']
 df['Value_Delta'] = df['ModelProb'] - df['ImpliedProb']
 
 # Create an Odds Bracket (1 = Heavy Fav, 2 = Medium, 3 = Underdog)
-# Bins updated to cover all possible odds safely
 conditions = [
     (df['Over25Odds'] <= 1.5),
     (df['Over25Odds'] > 1.5) & (df['Over25Odds'] <= 2.0),
@@ -64,12 +71,16 @@ conditions = [
 choices = [1, 2, 3]
 df['Odds_Bracket'] = np.select(conditions, choices, default=3)
 
+# 👇 NEW: Clean up Tournament IDs to ensure XGBoost can read them 👇
+df['TournamentId'] = pd.to_numeric(df['TournamentId'], errors='coerce').fillna(0)
+df['TournamentStageId'] = pd.to_numeric(df['TournamentStageId'], errors='coerce').fillna(0)
+
 print("✅ Features added.")
 # ==========================================
 
 # 3. Define Features (What Agent 3 looks at) and Target
-# UPDATED: Now includes our two new smart features
-X = df[['ModelProb', 'Over25Odds', 'Value_Delta', 'Odds_Bracket']]
+# 👇 NEW: Added TournamentId and TournamentStageId to Agent 3's brain 👇
+X = df[['ModelProb', 'Over25Odds', 'Value_Delta', 'Odds_Bracket', 'TournamentId', 'TournamentStageId']]
 y = df['ActualResult']
 
 # 4. Chronological Train/Test Split (80% Training, 20% Future Testing)
@@ -99,9 +110,9 @@ df_test['Agent3_Confidence'] = model.predict_proba(X_test)[:, 1]
 df_test['Agent3_Approved'] = (df_test['Agent3_Confidence'] > 0.50).astype(int)
 
 # 7. Compare the Results!
-print("\n" + "="*50)
+print("\n" + "=" * 50)
 print("💰 FINANCIAL AUDIT: Base Model vs. Agent 3 Filter")
-print("="*50)
+print("=" * 50)
 
 # --- BASE MODEL PERFORMANCE (Agent 1 alone) ---
 base_bets = len(df_test)
@@ -123,7 +134,7 @@ print(f"\n🚀 AGENT 3 (XGBoost Filter applied):")
 print(f"   Bets Approved: {a3_bets} (Saved you from {base_bets - a3_bets} bad bets!)")
 print(f"   Total Profit (1 Unit Flat): {a3_profit:.2f} Units")
 print(f"   Return on Investment: {a3_roi:.2f}%")
-print("="*50)
+print("=" * 50)
 
 # Save the brain so you can use it in your live predictor later!
 model.save_model("agent3_xgboost.json")
@@ -135,31 +146,39 @@ def train_xgboost_profit_optimizer(train_df, test_df):
     print("==================================================\n")
 
     # 1. Clean the TRAINING data and fit the model (Learning from the Past)
-    train_clean = train_df.dropna(subset=['ModelProb', 'Over25Odds', 'Value_Delta', 'Odds_Bracket', 'ProfitPer1Unit', 'ActualResult']).copy()
+    # 👇 NEW: Added Tournament fields to the dropna check 👇
+    train_clean = train_df.dropna(
+        subset=['ModelProb', 'Over25Odds', 'Value_Delta', 'Odds_Bracket', 'TournamentId', 'TournamentStageId',
+                'ProfitPer1Unit', 'ActualResult']).copy()
 
-    # UPDATED: Feed the optimizer our new features
-    X_train_opt = train_clean[['ModelProb', 'Over25Odds', 'Value_Delta', 'Odds_Bracket']]
+    # 👇 NEW: Feed the optimizer the Tournament features 👇
+    X_train_opt = train_clean[
+        ['ModelProb', 'Over25Odds', 'Value_Delta', 'Odds_Bracket', 'TournamentId', 'TournamentStageId']]
     y_train_opt = train_clean['ProfitPer1Unit']
 
     xgb_model = xgb.XGBRegressor(
         n_estimators=150,
-        learning_rate=0.02,        # Slower learning
-        max_depth=2,               # EXTREMELY shallow trees (only 2 questions deep)
-        min_child_weight=200,      # A rule MUST apply to at least 200 matches to be considered
-        subsample=0.7,             # Only look at 70% of data per tree
-        colsample_bytree=0.7,      # Only look at 70% of features per tree
-        reg_alpha=0.5,             # L1 Regularization (Kills useless features)
-        reg_lambda=1.5,            # L2 Regularization (Prevents extreme predictions)
+        learning_rate=0.02,  # Slower learning
+        max_depth=2,  # EXTREMELY shallow trees (only 2 questions deep)
+        min_child_weight=200,  # A rule MUST apply to at least 200 matches to be considered
+        subsample=0.7,  # Only look at 70% of data per tree
+        colsample_bytree=0.7,  # Only look at 70% of features per tree
+        reg_alpha=0.5,  # L1 Regularization (Kills useless features)
+        reg_lambda=1.5,  # L2 Regularization (Prevents extreme predictions)
         random_state=42
     )
 
     xgb_model.fit(X_train_opt, y_train_opt)
 
     # 2. Clean the TESTING data (Simulating the Future)
-    test_clean = test_df.dropna(subset=['ModelProb', 'Over25Odds', 'Value_Delta', 'Odds_Bracket', 'ProfitPer1Unit', 'ActualResult']).copy()
+    # 👇 NEW: Match test dropna columns 👇
+    test_clean = test_df.dropna(
+        subset=['ModelProb', 'Over25Odds', 'Value_Delta', 'Odds_Bracket', 'TournamentId', 'TournamentStageId',
+                'ProfitPer1Unit', 'ActualResult']).copy()
 
-    # UPDATED: Match the test features to the train features
-    X_test_opt = test_clean[['ModelProb', 'Over25Odds', 'Value_Delta', 'Odds_Bracket']]
+    # 👇 NEW: Match the test features to the train features 👇
+    X_test_opt = test_clean[
+        ['ModelProb', 'Over25Odds', 'Value_Delta', 'Odds_Bracket', 'TournamentId', 'TournamentStageId']]
 
     # 3. Generate Predictions on the UNSEEN future data
     test_clean['XGB_Predicted_Profit'] = xgb_model.predict(X_test_opt)
@@ -190,9 +209,11 @@ def train_xgboost_profit_optimizer(train_df, test_df):
     xgb_model.save_model("agent4_profit_optimizer.json")
     return xgb_model
 
+
 # --- HOW TO RUN IT ---
 # Pass your dataframe containing the new features:
 optimizer_model = train_xgboost_profit_optimizer(df_train, df_test)
+
 
 def audit_agent3_ev(test_df):
     print("\n==================================================")
@@ -226,9 +247,11 @@ def audit_agent3_ev(test_df):
 
     print("==================================================")
 
+
 # --- HOW TO RUN IT ---
 # We just pass in df_test, since Agent 3 already generated its Confidence scores on it!
 audit_agent3_ev(df_test)
+
 
 def diagnose_agent1_accuracy(df):
     print("\n==================================================")
@@ -271,6 +294,7 @@ def diagnose_agent1_accuracy(df):
     audit_df = pd.DataFrame(results)
     print(audit_df.to_string(index=False))
     print("\n==================================================")
+
 
 # --- Run the real diagnostic ---
 diagnose_agent1_accuracy(df)

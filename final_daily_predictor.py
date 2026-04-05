@@ -9,35 +9,33 @@ warnings.filterwarnings('ignore')
 
 
 def run_daily_predictions():
-    print("\n" + "=" * 60)
+    print("\n" + "=" * 70)
     print(f"🔮 SYNDICATE AI: Daily Betting Slip ({datetime.now().strftime('%Y-%m-%d')})")
-    print("=" * 60 + "\n")
+    print("=" * 70 + "\n")
 
     # 1. Connect to Database
-    db_string = "postgresql://postgres:tiko400090@127.0.0.1:65432/football"
+    db_string = "postgresql://postgres:tiko400090@127.0.0.1:5432/football"
     engine = create_engine(db_string)
 
     print("🔌 Fetching today's upcoming matches from the database...")
 
-    # 2. SQL Query for FUTURE matches
-    # Notice we look for GoalsCount IS NULL (match hasn't happened)
-    # and we pull your recent form columns!
+    # 2. SQL Query for FUTURE matches (Matched exactly to your 6-feature brain)
     sql_query = """
-                SELECT m."MatchId",
-                       p."Date",
-                       p."HomeTeam",
-                       p."AwayTeam",
-                       m."HomeRecentGoals", -- Change to your exact column name!
-                       m."AwayRecentGoals", -- Change to your exact column name! 
-                       p."AI_Over25_Prob" / 100.0 AS "ModelProb",
+                SELECT m."MatchId", \
+                       p."Date", \
+                       p."HomeTeam", \
+                       p."AwayTeam", \
+                       m."TournamentId", \
+                       m."TournamentStageId", \
+                       p."AI_Over25_Prob" / 100.0 AS "ModelProb", \
                        m."Over25Odds"
                 FROM "AiPredictionsLogs" p
                          JOIN "Matches" m ON p."MatchId" = m."MatchId"
                 WHERE m."Over25Odds" IS NOT NULL
-                  AND p."Model" = 'v2_prematch'
-                  AND m."GoalsCount" IS NULL                      -- Only get pending matches
-                  AND p."Date" >= CURRENT_DATE - INTERVAL '1 day' -- Matches today or in the future
-                ORDER BY p."Date" ASC; 
+                  AND p."Model" = 'v3_prematch'
+                  AND m."GoalsCount" IS NULL -- FUTURE MATCHES ONLY
+                  AND p."Date" >= CURRENT_DATE - INTERVAL '1 day'
+                ORDER BY p."Date" ASC; \
                 """
 
     try:
@@ -50,9 +48,9 @@ def run_daily_predictions():
         print("⏸️ No upcoming matches found in the database for today.")
         return
 
-    print(f"✅ Found {len(df)} upcoming matches. Running AI analysis...\n")
+    print(f"✅ Found {len(df)} upcoming matches. Running v3 AI analysis...\n")
 
-    # 3. Feature Engineering (Exactly as trained)
+    # 3. Feature Engineering
     df['ImpliedProb'] = 1.0 / df['Over25Odds']
     df['Value_Delta'] = df['ModelProb'] - df['ImpliedProb']
 
@@ -62,31 +60,40 @@ def run_daily_predictions():
         (df['Over25Odds'] > 2.0)
     ]
     df['Odds_Bracket'] = np.select(conditions, [1, 2, 3], default=3)
-    df['Total_Form_Firepower'] = df['HomeRecentGoals'] + df['AwayRecentGoals']
 
-    # 4. Load the Trained Agent 3 Brain
-    features = ['ModelProb', 'Over25Odds', 'Value_Delta', 'Odds_Bracket', 'Total_Form_Firepower']
+    # Clean IDs
+    df['TournamentId'] = pd.to_numeric(df['TournamentId'], errors='coerce').fillna(0)
+    df['TournamentStageId'] = pd.to_numeric(df['TournamentStageId'], errors='coerce').fillna(0)
+
+    # 4. Load the Trained Agent 3 Brain (Exactly 6 features)
+    features = [
+        'ModelProb',
+        'Over25Odds',
+        'Value_Delta',
+        'Odds_Bracket',
+        'TournamentId',
+        'TournamentStageId'
+    ]
     X_live = df[features]
 
     model = xgb.XGBClassifier()
     try:
         model.load_model("agent3_xgboost.json")
     except FileNotFoundError:
-        print("❌ Error: 'agent3_xgboost.json' not found. Make sure you run the trainer script first to save the model!")
+        print("❌ Error: 'agent3_xgboost.json' not found in the directory.")
         return
 
-    # 5. Agent 3 makes its predictions
+    # 5. Agent 3 recalculates the True Probability
     df['Agent3_Prob'] = model.predict_proba(X_live)[:, 1]
 
     # 6. The Math Filter: Calculate True Expected Value (EV)
     df['True_EV'] = (df['Agent3_Prob'] * df['Over25Odds']) - 1
 
     # 7. Generate the Betting Slip (Filter for EV > 0.0)
-    # You can raise this to > 0.05 if you want to be more conservative
     bets_to_place = df[df['True_EV'] > 0.0].copy()
 
     if len(bets_to_place) == 0:
-        print("🛡️ No mathematically profitable bets found today. Protect your bankroll and skip betting.")
+        print("🛡️ No mathematically profitable bets found today. Protect your bankroll.")
         return
 
     # Sort by the highest Edge (EV) first
@@ -94,27 +101,65 @@ def run_daily_predictions():
 
     print("💰 OFFICIALLY APPROVED BETS (EV > 0.0)")
     print("-" * 110)
-    print(f"{'Time':<18} | {'Match':<35} | {'Odds':<6} | {'A3 Prob':<9} | {'Edge (EV)':<10}")
+    print(f"{'MatchId'} | {'Time':<18} | {'Match':<35} | {'Odds':<6} | {'A3 Prob':<9} | {'Edge (EV)':<10}")
     print("-" * 110)
 
     for index, row in bets_to_place.iterrows():
-        # Formatting for a clean read
         match_name = f"{row['HomeTeam']} vs {row['AwayTeam']}"
         if len(match_name) > 33:
             match_name = match_name[:30] + "..."
 
-        time_str = str(row['Date'])[:16]  # Truncate seconds
+        time_str = str(row['Date'])[:16]
         odds = f"{row['Over25Odds']:.2f}"
         prob = f"{(row['Agent3_Prob'] * 100):.1f}%"
         ev = f"+{(row['True_EV'] * 100):.2f}%"
 
-        print(f"{time_str:<18} | {match_name:<35} | {odds:<6} | {prob:<9} | {ev:<10}")
+        print(f"{row['MatchId']} | {time_str:<18} | {match_name:<35} | {odds:<6} | {prob:<9} | {ev:<10}")
 
     print("-" * 110)
     print(f"📋 Total Bets for Today: {len(bets_to_place)}")
     print("=" * 110 + "\n")
 
+    # ==========================================
+    # 💾 8. SAVE TO DATABASE
+    # ==========================================
+    print("💾 Archiving predictions to database...")
 
-# Run it!
+    # Format the dataframe to match your AiPredictionsLogs table
+    save_df = bets_to_place[['MatchId', 'Date', 'HomeTeam', 'AwayTeam']].copy()
+
+    # Scale probability back to 0-100 format for your database
+    save_df['AI_Over25_Prob'] = (bets_to_place['Agent3_Prob'] * 100).round(2)
+
+    save_df['PredictedOn'] = pd.Timestamp.utcnow()
+
+    MODEL_NAME = 'FinalPredictionXGBoost'
+    # Set the new model name
+    save_df['Model'] = MODEL_NAME
+
+    try:
+        # Fetch MatchIds already saved for this model
+        existing = pd.read_sql(
+            f'SELECT "MatchId" FROM "AiPredictionsLogs" WHERE "Model" = \'{MODEL_NAME}\';',
+            con=engine
+        )
+        already_logged = set(existing['MatchId'].astype(str))
+
+        new_predictions = save_df[~save_df['MatchId'].isin(already_logged)]
+        skipped = len(save_df) - len(new_predictions)
+
+        if len(new_predictions) == 0:
+            print("✅ Nothing to save — all matches already logged.")
+        else:
+            new_predictions.to_sql('AiPredictionsLogs', con=engine, if_exists='append', index=False)
+            print(f"✅ Saved {len(new_predictions)} new predictions.")
+            if skipped:
+                print(f"⏭️  Skipped {skipped} already-logged matches.")
+    except Exception as e:
+        print(f"❌ Error saving to database: {e}")
+        print(
+            "💡 Tip: If your AiPredictionsLogs table has strict constraints (like primary keys or missing columns), you may need to adjust the save_df format.")
+
+
 if __name__ == "__main__":
     run_daily_predictions()

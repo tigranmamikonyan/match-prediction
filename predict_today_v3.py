@@ -12,7 +12,7 @@ warnings.filterwarnings('ignore')
 # ---------------------------------------------------------
 # CONFIG
 # ---------------------------------------------------------
-DB_URL = "postgresql://postgres:tiko400090@127.0.0.1:65432/football"
+DB_URL = "postgresql://postgres:tiko400090@127.0.0.1:5432/football"
 
 MODEL_PATH    = 'over25_brain_v3_prematch.keras'
 SCALER_PATH   = 'over25_scaler_v3_prematch.save'
