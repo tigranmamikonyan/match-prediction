@@ -14,7 +14,7 @@ def run_daily_predictions():
     print("=" * 70 + "\n")
 
     # 1. Connect to Database
-    db_string = "postgresql://postgres:tiko400090@127.0.0.1:5432/football"
+    db_string = "postgresql://postgres:tiko400090@127.0.0.1:65432/football"
     engine = create_engine(db_string)
 
     print("🔌 Fetching today's upcoming matches from the database...")
